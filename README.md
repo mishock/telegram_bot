@@ -2,6 +2,19 @@
 
 Проект Telegram-бота на Python с запуском в Docker.
 
+## Что умеет программа
+- Отвечает пользователям с учетом системного промпта и контекста диалога.
+- Ведет базу пользователей в `users.db` и сохраняет историю сообщений в `user_logs/`.
+- Поддерживает сбор контактных данных: телефон и email.
+- Экспортирует пользователей в CSV (`/exportusers`).
+- Делает массовые рассылки:
+  - всем пользователям (`/broadcast`)
+  - из файла `message.txt` (`/broadcastfile`)
+  - по списку ID (`/broadcastids`)
+- Управляет списком ID для рассылок (`/addid`, `/removeid`, `/clearids`, `/broadcastlist`).
+- Показывает статистику и сервисную информацию (`/stats`, `/userinfo`, `/getlog`, `/listlogs`, `/synclogs`).
+- Использует локальную базу знаний из `knowledge_base.json` и fallback на AI-ответ.
+
 ## Требования
 - Raspberry Pi 5
 - Docker и Docker Compose
