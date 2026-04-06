@@ -599,6 +599,29 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # КОМАНДЫ БОТА
 # ============================================
 
+SERVICE_BUTTON_TEXT = "Сервис"
+INSTRUCTIONS_BUTTON_TEXT = "Инструкции"
+YAK_INSTRUCTION_TEXT = "Як"
+DILIGENCE_INSTRUCTION_TEXT = "Дилижанс"
+WASHER_INSTRUCTION_TEXT = "Поливомоечная машина"
+AWAITING_INSTRUCTION_KEY = "awaiting_instruction_vehicle"
+
+def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[SERVICE_BUTTON_TEXT, INSTRUCTIONS_BUTTON_TEXT]],
+        resize_keyboard=True
+    )
+
+def get_instruction_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [YAK_INSTRUCTION_TEXT, DILIGENCE_INSTRUCTION_TEXT],
+            [WASHER_INSTRUCTION_TEXT]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -630,14 +653,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Для связи с менеджером: /phone"""
     
     log_message(user_id, "BOT", welcome, username)
-    await update.message.reply_text(welcome)
+    await update.message.reply_text(welcome, reply_markup=get_main_menu_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда help"""
     user_id = update.effective_user.id
-    
-    if user_id == ADMIN_ID:
-        help_text = """🔐 **АДМИН ПАНЕЛЬ**
+
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ Команда /help доступна только администратору.")
+        return
+
+    help_text = """🔐 **АДМИН ПАНЕЛЬ**
 
 📚 **Команды рассылки:**
 /broadcast текст - рассылка всем
@@ -665,22 +691,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /myphone - показать свой номер
 
 🤖 **AI:** DeepSeek"""
-    else:
-        help_text = """📚 **Чем я могу помочь?**
 
-🔹 **Спросите меня о:**
-• Компании ЭЛЬТАВР
-• Электробусах «Дилижанс»
-• Электрогрузовиках «Як»
-• Ценах и характеристиках
-• Аккумуляторах и заряде
-• Контактах
-
-🔹 **Связаться с менеджером:**
-/phone - поделиться номером телефона
-
-🤖 **AI:** DeepSeek"""
-    
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 # === КОМАНДЫ РАССЫЛКИ ===
@@ -947,6 +958,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text.startswith('/'):
         return
+
+    if text == SERVICE_BUTTON_TEXT:
+        log_message(user_id, "USER", text, username)
+        await update.message.chat.send_action(action="typing")
+        service_prompt = (
+            "Пользователь нажал кнопку 'Сервис'. "
+            "Дай информацию по сервису и контакты сервисного центра компании ЭЛЬТАВР."
+        )
+        response = await get_ai_response(service_prompt, user_id, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    if text == INSTRUCTIONS_BUTTON_TEXT:
+        context.user_data[AWAITING_INSTRUCTION_KEY] = True
+        response = (
+            "Выберите технику, по которой нужна инструкция:\n"
+            f"• {YAK_INSTRUCTION_TEXT}\n"
+            f"• {DILIGENCE_INSTRUCTION_TEXT}\n"
+            f"• {WASHER_INSTRUCTION_TEXT}"
+        )
+        log_message(user_id, "USER", text, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_instruction_keyboard()
+        )
+        return
+
+    if context.user_data.get(AWAITING_INSTRUCTION_KEY):
+        valid_instruction_targets = {
+            YAK_INSTRUCTION_TEXT,
+            DILIGENCE_INSTRUCTION_TEXT,
+            WASHER_INSTRUCTION_TEXT
+        }
+        if text not in valid_instruction_targets:
+            response = (
+                "Пожалуйста, выберите технику кнопкой:\n"
+                f"• {YAK_INSTRUCTION_TEXT}\n"
+                f"• {DILIGENCE_INSTRUCTION_TEXT}\n"
+                f"• {WASHER_INSTRUCTION_TEXT}"
+            )
+            log_message(user_id, "USER", text, username)
+            log_message(user_id, "BOT", response, username)
+            await update.message.reply_text(
+                response,
+                reply_markup=get_instruction_keyboard()
+            )
+            return
+
+        context.user_data[AWAITING_INSTRUCTION_KEY] = False
+        log_message(user_id, "USER", text, username)
+        await update.message.chat.send_action(action="typing")
+        instruction_prompt = (
+            f"Пользователь выбрал технику '{text}'. "
+            "Предоставь инструкцию по эксплуатации и базовому обслуживанию для этой техники."
+        )
+        response = await get_ai_response(instruction_prompt, user_id, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
     
     # Защита от грубостей
     rude_words = ["гандон", "дурак", "идиот", "козел", "сволочь", "тварь", "сука"]
@@ -964,7 +1042,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await get_ai_response(text, user_id, username)
     
     log_message(user_id, "BOT", response, username)
-    await update.message.reply_text(response)
+    await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
 
 # ============================================
 # ЗАПУСК БОТА
