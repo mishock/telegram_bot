@@ -1,0 +1,17 @@
+# На Raspberry Pi
+cd ~/telegram_bot
+
+# Запуск
+sudo docker-compose up -d
+
+# Остановка
+sudo docker-compose down
+
+# Перезапуск
+sudo docker-compose restart
+
+# Логи
+sudo docker logs eltavr-bot -f
+
+# Статус
+sudo docker ps

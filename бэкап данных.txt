@@ -1,0 +1,58 @@
+# Резервное копирование
+sudo docker exec eltavr-bot tar czf - /app/user_logs /app/exports /app/users.db > backup_$(date +%Y%m%d).tar.gz
+
+# Восстановление
+sudo docker cp backup_20241201.tar.gz eltavr-bot:/app/
+sudo docker exec eltavr-bot tar xzf /app/backup_20241201.tar.gz -C /
+
+==================================================================================================================
+ Проверьте созданный бэкап:
+bash
+# Смотрим список файлов
+ls -la backup_*.tar.gz
+
+# Проверяем содержимое архива
+tar -tzf backup_$(date +%Y%m%d).tar.gz | head -20
+
+# Узнаём размер
+du -sh backup_*.tar.gz
+📁 Что сохранилось в бэкапе:
+/app/user_logs/ - все логи переписки с пользователями
+
+/app/exports/ - CSV файлы с экспортом пользователей
+
+/app/users.db - база данных пользователей
+
+🔄 Как восстановиться из бэкапа:
+bash
+# Останавливаем бота
+sudo docker-compose down
+
+# Восстанавливаем файлы
+sudo tar -xzf backup_YYYYMMDD.tar.gz -C .
+
+# Запускаем бота
+sudo docker-compose up -d
+📋 Дополнительные полезные команды:
+bash
+# Создать бэкап с датой в имени
+sudo docker exec eltavr-bot tar czf - /app/user_logs /app/exports /app/users.db > backup_$(date +%Y%m%d_%H%M%S).tar.gz
+
+# Создать бэкап в отдельную папку
+mkdir -p backups
+sudo docker exec eltavr-bot tar czf - /app/user_logs /app/exports /app/users.db > backups/backup_$(date +%Y%m%d_%H%M%S).tar.gz
+
+# Автоматический бэкап раз в день (через cron)
+crontab -e
+# Добавить строку:
+0 2 * * * cd /home/pi/telegram_bot && sudo docker exec eltavr-bot tar czf - /app/user_logs /app/exports /app/users.db > backups/backup_$(date +\%Y\%m\%d).tar.gz
+💾 Рекомендация по хранению бэкапов:
+bash
+# Создаём папку для бэкапов
+mkdir -p ~/backups
+
+# Перемещаем бэкап
+mv backup_*.tar.gz ~/backups/
+
+# Оставляем только последние 7 бэкапов
+ls -t ~/backups/backup_*.tar.gz | tail -n +8 | xargs rm -f

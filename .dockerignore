@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+*.so
+.git
+.gitignore
+.env.example
+README.md
+venv
+.venv
+.vscode
+.idea
+*.log
+*.db-shm
+*.db-wal
