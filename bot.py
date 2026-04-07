@@ -48,6 +48,19 @@ BROADCAST_IDS_FILE = "broadcast_ids.txt"
 # Файл с system_prompt для DeepSeek
 SYSTEM_PROMPT_FILE = "system_prompt.txt"
 
+# Файлы инструкций и сервиса для отправки пользователю
+SERVICE_DOC_FILES = [
+    "knowledge/service/diligence_service_book_2026.pdf",
+    "knowledge/service/yak_service_book.pdf",
+    "knowledge/service/yak_washer_service_book.pdf",
+]
+
+INSTRUCTION_DOC_FILES = {
+    "Як": "knowledge/instructions/yak_manual_2025.pdf",
+    "Дилижанс": "knowledge/instructions/diligence_manual_2025.pdf",
+    "Поливомоечная машина": "knowledge/instructions/washer_operation_manual.pdf",
+}
+
 # Файл для постоянного экспорта пользователей
 USERS_EXPORT_FILE = os.path.join(EXPORTS_DIR, "users_export.csv")
 
@@ -622,6 +635,18 @@ def get_instruction_keyboard() -> ReplyKeyboardMarkup:
         one_time_keyboard=True
     )
 
+async def send_doc_if_exists(update: Update, file_path: str) -> bool:
+    """Отправляет документ, если файл существует."""
+    if not os.path.exists(file_path):
+        return False
+    try:
+        with open(file_path, "rb") as doc_file:
+            await update.message.reply_document(document=doc_file)
+        return True
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки файла {file_path}: {e}")
+        return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -972,6 +997,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response,
             reply_markup=get_main_menu_keyboard()
         )
+        for service_doc in SERVICE_DOC_FILES:
+            await send_doc_if_exists(update, service_doc)
         return
 
     if text == INSTRUCTIONS_BUTTON_TEXT:
@@ -1014,16 +1041,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[AWAITING_INSTRUCTION_KEY] = False
         log_message(user_id, "USER", text, username)
         await update.message.chat.send_action(action="typing")
-        instruction_prompt = (
-            f"Пользователь выбрал технику '{text}'. "
-            "Предоставь инструкцию по эксплуатации и базовому обслуживанию для этой техники."
+        response = (
+            f"Вы запросили инструкцию на {text}. "
+            "Подробную инструкцию отправляю файлом для ознакомления и скачивания."
         )
-        response = await get_ai_response(instruction_prompt, user_id, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(
             response,
             reply_markup=get_main_menu_keyboard()
         )
+        selected_doc = INSTRUCTION_DOC_FILES.get(text)
+        if selected_doc:
+            await send_doc_if_exists(update, selected_doc)
         return
     
     # Защита от грубостей
