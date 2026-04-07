@@ -5,6 +5,7 @@ import json
 import random
 import csv
 import io
+import urllib.request
 from datetime import datetime
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -60,6 +61,11 @@ INSTRUCTION_DOC_FILES = {
     "Дилижанс": "knowledge/instructions/diligence_manual_2025.pdf",
     "Поливомоечная машина": "knowledge/instructions/washer_operation_manual.pdf",
 }
+
+SHEET_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1c9__Xbrq8RAfEjphu-Sb4iS3WnHMLDYc4SIcVhVqNzU/export?format=csv&gid=1062019695"
+)
 
 # Файл для постоянного экспорта пользователей
 USERS_EXPORT_FILE = os.path.join(EXPORTS_DIR, "users_export.csv")
@@ -618,6 +624,7 @@ YAK_INSTRUCTION_TEXT = "Як"
 DILIGENCE_INSTRUCTION_TEXT = "Дилижанс"
 WASHER_INSTRUCTION_TEXT = "Поливомоечная машина"
 AWAITING_INSTRUCTION_KEY = "awaiting_instruction_vehicle"
+AWAITING_FRAME_LOOKUP_KEY = "awaiting_frame_lookup"
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -646,6 +653,56 @@ async def send_doc_if_exists(update: Update, file_path: str) -> bool:
     except Exception as e:
         print(f"⚠️ Ошибка отправки файла {file_path}: {e}")
         return False
+
+def normalize_frame_number(value: str) -> str:
+    """Нормализует номер рамы для строгого сравнения."""
+    return "".join((value or "").upper().split())
+
+def get_frame_status_from_sheet(frame_number: str):
+    """
+    Возвращает данные по номеру рамы из публичного CSV Google Sheets.
+    Ожидаемые колонки: Статус Сборки, Вид Авто, № рамы, Комплектация.
+    """
+    try:
+        with urllib.request.urlopen(SHEET_CSV_URL, timeout=15) as response:
+            content = response.read().decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        return None, None, f"Ошибка доступа к таблице: {e}"
+
+    rows = list(csv.reader(io.StringIO(content)))
+    if not rows:
+        return None, None, "Таблица пуста."
+
+    status_col = "Статус Сборки"
+    car_type_col = "Вид Авто"
+    frame_col = "№ рамы"
+    config_col = "Комплектация"
+    required_cols = {status_col, car_type_col, frame_col, config_col}
+
+    header_row_index = None
+    header_map = {}
+    for idx, row in enumerate(rows[:20]):
+        row_values = [cell.strip() for cell in row]
+        if required_cols.issubset(set(row_values)):
+            header_row_index = idx
+            header_map = {name: row_values.index(name) for name in required_cols}
+            break
+
+    if header_row_index is None:
+        return None, None, "Не удалось найти строку заголовков в таблице."
+
+    target = normalize_frame_number(frame_number)
+    for row in rows[header_row_index + 1:]:
+        if len(row) <= header_map[frame_col]:
+            continue
+        row_frame = normalize_frame_number(row[header_map[frame_col]])
+        if row_frame == target:
+            status = row[header_map[status_col]].strip() if len(row) > header_map[status_col] else ""
+            car_type = row[header_map[car_type_col]].strip() if len(row) > header_map[car_type_col] else ""
+            config = row[header_map[config_col]].strip() if len(row) > header_map[config_col] else ""
+            return status, car_type, config, None
+
+    return None, None, None, None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -985,20 +1042,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == SERVICE_BUTTON_TEXT:
+        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = True
+        response = "Введите номер рамы, и я покажу Статус сборки и Вид авто."
         log_message(user_id, "USER", text, username)
-        await update.message.chat.send_action(action="typing")
-        service_prompt = (
-            "Пользователь нажал кнопку 'Сервис'. "
-            "Дай информацию по сервису и контакты сервисного центра компании ЭЛЬТАВР."
-        )
-        response = await get_ai_response(service_prompt, user_id, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(
             response,
             reply_markup=get_main_menu_keyboard()
         )
-        for service_doc in SERVICE_DOC_FILES:
-            await send_doc_if_exists(update, service_doc)
+        return
+
+    if context.user_data.get(AWAITING_FRAME_LOOKUP_KEY):
+        frame_number = text.strip()
+        status, car_type, config, error = get_frame_status_from_sheet(frame_number)
+
+        if error:
+            response = f"Не удалось получить данные. {error}"
+        elif status is None and car_type is None and config is None:
+            response = f"Номер рамы {frame_number} не найден."
+        else:
+            response = (
+                f"Номер рамы: {frame_number}\n"
+                f"Статус сборки: {status or 'не указан'}\n"
+                f"Вид авто: {car_type or 'не указан'}\n"
+                f"Комплектация: {config or 'не указана'}"
+            )
+
+        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
+        log_message(user_id, "USER", frame_number, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
         return
 
     if text == INSTRUCTIONS_BUTTON_TEXT:
