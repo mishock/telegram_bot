@@ -5,6 +5,7 @@ import json
 import random
 import csv
 import io
+import re
 import urllib.request
 from datetime import datetime
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -64,7 +65,11 @@ INSTRUCTION_DOC_FILES = {
 
 SHEET_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
-    "1c9__Xbrq8RAfEjphu-Sb4iS3WnHMLDYc4SIcVhVqNzU/export?format=csv&gid=1062019695"
+    "1c9__Xbrq8RAfEjphu-Sb4iS3WnHMLDYc4SIcVhVqNzU/export?format=csv&gid=0"
+)
+MAINTENANCE_SHEET_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1II4KEQZHzkfzabq9wgCuIOyVaOhl-9nNgUYLQky328s/export?format=csv&gid=1469311667"
 )
 
 # Файл для постоянного экспорта пользователей
@@ -625,9 +630,11 @@ DILIGENCE_INSTRUCTION_TEXT = "Дилижанс"
 WASHER_INSTRUCTION_TEXT = "Поливомоечная машина"
 SERVICE_BOOKS_BUTTON_TEXT = "Сервисные книжки"
 SERVICE_VIN_BUTTON_TEXT = "Поиск по VIN"
+SERVICE_MAINTENANCE_BUTTON_TEXT = "Плановое ТО"
 BACK_TO_MAIN_MENU_TEXT = "Главное меню"
 AWAITING_INSTRUCTION_KEY = "awaiting_instruction_vehicle"
 AWAITING_FRAME_LOOKUP_KEY = "awaiting_frame_lookup"
+AWAITING_MAINTENANCE_LOOKUP_KEY = "awaiting_maintenance_lookup"
 SERVICE_SUBMENU_KEY = "service_submenu_active"
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -640,6 +647,7 @@ def get_service_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [SERVICE_BOOKS_BUTTON_TEXT, SERVICE_VIN_BUTTON_TEXT],
+            [SERVICE_MAINTENANCE_BUTTON_TEXT],
             [BACK_TO_MAIN_MENU_TEXT],
         ],
         resize_keyboard=True,
@@ -669,53 +677,190 @@ async def send_doc_if_exists(update: Update, file_path: str) -> bool:
 
 def normalize_frame_number(value: str) -> str:
     """Нормализует номер рамы для строгого сравнения."""
-    return "".join((value or "").upper().split())
+    normalized = (value or "").upper().strip()
+    normalized = normalized.replace("*", "").replace("'", "").replace('"', "")
+    normalized = "".join(normalized.split())
+    # Приводим похожие кириллические символы к латинице.
+    cyr_to_lat = str.maketrans({
+        "А": "A", "В": "B", "С": "C", "Е": "E", "Н": "H",
+        "К": "K", "М": "M", "О": "O", "Р": "P", "Т": "T",
+        "Х": "X", "У": "Y",
+    })
+    return normalized.translate(cyr_to_lat)
 
-def get_frame_status_from_sheet(frame_number: str):
+def normalize_header(value: str) -> str:
+    """Нормализует заголовок колонки для поиска по имени."""
+    return " ".join((value or "").strip().lower().replace("ё", "е").split())
+
+
+def parse_date_safe(value: str):
+    """Пробует распарсить дату из строки в популярных форматах."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def get_frame_data_from_sheet(frame_number: str):
     """
     Возвращает данные по номеру рамы из публичного CSV Google Sheets.
-    Ожидаемые колонки: Статус Сборки, Вид Авто, № рамы, Комплектация.
+    Ищет колонки по их названиям в строке заголовков.
     """
     try:
         with urllib.request.urlopen(SHEET_CSV_URL, timeout=15) as response:
             content = response.read().decode("utf-8-sig", errors="replace")
     except Exception as e:
-        return None, None, f"Ошибка доступа к таблице: {e}"
+        return None, f"Ошибка доступа к таблице: {e}"
 
     rows = list(csv.reader(io.StringIO(content)))
     if not rows:
-        return None, None, "Таблица пуста."
+        return None, "Таблица пуста."
 
-    status_col = "Статус Сборки"
-    car_type_col = "Вид Авто"
-    frame_col = "№ рамы"
-    config_col = "Комплектация"
-    required_cols = {status_col, car_type_col, frame_col, config_col}
+    header_aliases = {
+        "frame": {
+            "№ рамы", "номер рамы", "vin", "vin номер", "vin-код", "vin код", "машина"
+        },
+        "config": {"комплектация"},
+        "customer": {"заказчик", "клиент"},
+        "ship_date": {"дата отгрузки заказчику", "дата отгрузки", "отгрузка"},
+        "service_date": {"дата планового то", "плановое то", "дата то"},
+    }
+
+    normalized_aliases = {
+        key: {normalize_header(alias) for alias in aliases}
+        for key, aliases in header_aliases.items()
+    }
 
     header_row_index = None
     header_map = {}
-    for idx, row in enumerate(rows[:20]):
-        row_values = [cell.strip() for cell in row]
-        if required_cols.issubset(set(row_values)):
+    for idx, row in enumerate(rows[:30]):
+        current_map = {}
+        for col_idx, cell in enumerate(row):
+            cell_norm = normalize_header(cell)
+            if not cell_norm:
+                continue
+            for key, aliases in normalized_aliases.items():
+                if key not in current_map and cell_norm in aliases:
+                    current_map[key] = col_idx
+        if "frame" in current_map:
             header_row_index = idx
-            header_map = {name: row_values.index(name) for name in required_cols}
+            header_map = current_map
             break
 
     if header_row_index is None:
-        return None, None, "Не удалось найти строку заголовков в таблице."
+        return None, "Не удалось найти заголовки в таблице."
 
     target = normalize_frame_number(frame_number)
     for row in rows[header_row_index + 1:]:
-        if len(row) <= header_map[frame_col]:
+        frame_idx = header_map.get("frame")
+        if frame_idx is None or len(row) <= frame_idx:
             continue
-        row_frame = normalize_frame_number(row[header_map[frame_col]])
+        row_frame = normalize_frame_number(row[frame_idx])
         if row_frame == target:
-            status = row[header_map[status_col]].strip() if len(row) > header_map[status_col] else ""
-            car_type = row[header_map[car_type_col]].strip() if len(row) > header_map[car_type_col] else ""
-            config = row[header_map[config_col]].strip() if len(row) > header_map[config_col] else ""
-            return status, car_type, config, None
+            # По требованию: поле "Машина" выдаём строго из колонки B.
+            machine_from_col_b = row[1].strip() if len(row) > 1 else ""
+            data = {
+                "machine": machine_from_col_b,
+                "config": row[header_map["config"]].strip()
+                if "config" in header_map and len(row) > header_map["config"] else "",
+                "customer": row[header_map["customer"]].strip()
+                if "customer" in header_map and len(row) > header_map["customer"] else "",
+                "ship_date": row[header_map["ship_date"]].strip()
+                if "ship_date" in header_map and len(row) > header_map["ship_date"] else "",
+                "service_date": row[header_map["service_date"]].strip()
+                if "service_date" in header_map and len(row) > header_map["service_date"] else "",
+            }
+            return data, None
 
-    return None, None, None, None
+    return None, None
+
+
+def get_maintenance_data_from_sheet(frame_number: str):
+    """
+    Ищет VIN в колонке "Шасси" и возвращает:
+    - дату продажи
+    - все плановые ТО из колонок 1..5
+    """
+    try:
+        with urllib.request.urlopen(MAINTENANCE_SHEET_CSV_URL, timeout=15) as response:
+            content = response.read().decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        return None, f"Ошибка доступа к таблице ТО: {e}"
+
+    rows = list(csv.reader(io.StringIO(content)))
+    if not rows:
+        return None, "Таблица ТО пуста."
+
+    chassis_aliases = {"шасси"}
+    sale_aliases = {"дата продажи"}
+    fallback_chassis_idx = 4  # Колонка E
+    fallback_contacts_idx = 2  # Колонка C
+    fallback_machine_name_idx = 3  # Колонка D
+
+    header_row_index = None
+    chassis_idx = None
+    sale_idx = None
+    maintenance_cols = {}
+
+    for idx, row in enumerate(rows[:30]):
+        normalized = [normalize_header(cell) for cell in row]
+        for col_idx, col_name in enumerate(normalized):
+            if chassis_idx is None and col_name in chassis_aliases:
+                chassis_idx = col_idx
+            if sale_idx is None and col_name in sale_aliases:
+                sale_idx = col_idx
+            match = re.search(r"(\d+)\s*плановое то", col_name)
+            if match:
+                to_number = int(match.group(1))
+                if 1 <= to_number <= 5:
+                    maintenance_cols[to_number] = col_idx
+        if chassis_idx is not None:
+            header_row_index = idx
+            break
+        # reset for next potential header row
+        chassis_idx = None
+        sale_idx = None
+        maintenance_cols = {}
+
+    # Если заголовок "Шасси" не найден, используем фиксированную колонку E.
+    if header_row_index is None:
+        header_row_index = 0
+    if chassis_idx is None:
+        chassis_idx = fallback_chassis_idx
+
+    target = normalize_frame_number(frame_number)
+    for row in rows[header_row_index + 1:]:
+        if len(row) <= chassis_idx:
+            continue
+        row_frame = normalize_frame_number(row[chassis_idx])
+        if row_frame != target:
+            continue
+
+        sale_date = row[sale_idx].strip() if sale_idx is not None and len(row) > sale_idx else ""
+        contacts = row[fallback_contacts_idx].strip() if len(row) > fallback_contacts_idx else ""
+        machine_name = row[fallback_machine_name_idx].strip() if len(row) > fallback_machine_name_idx else ""
+
+        maintenance_values = {}
+        for to_number in range(1, 6):
+            col_idx = maintenance_cols.get(to_number)
+            value = ""
+            if col_idx is not None and len(row) > col_idx:
+                value = row[col_idx].strip()
+            maintenance_values[f"to_{to_number}"] = value
+
+        return {
+            "sale_date": sale_date,
+            "contacts": contacts,
+            "machine_name": machine_name,
+            "maintenance_values": maintenance_values,
+        }, None
+
+    return None, None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1056,6 +1201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == BACK_TO_MAIN_MENU_TEXT:
         context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
+        context.user_data.pop(AWAITING_MAINTENANCE_LOOKUP_KEY, None)
         context.user_data.pop(AWAITING_INSTRUCTION_KEY, None)
         context.user_data.pop(SERVICE_SUBMENU_KEY, None)
         response = "Главное меню."
@@ -1067,11 +1213,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == SERVICE_BUTTON_TEXT:
         context.user_data.pop(AWAITING_INSTRUCTION_KEY, None)
         context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
+        context.user_data[AWAITING_MAINTENANCE_LOOKUP_KEY] = False
         context.user_data[SERVICE_SUBMENU_KEY] = True
         response = (
             "Раздел сервиса.\n"
             "Сервисные книжки — три PDF для скачивания.\n"
-            "Поиск по VIN — статус сборки по номеру рамы (как в таблице)."
+            "Поиск по VIN — данные по отгрузке и комплектации.\n"
+            "Плановое ТО — дата продажи и следующее ТО."
         )
         log_message(user_id, "USER", text, username)
         log_message(user_id, "BOT", response, username)
@@ -1084,6 +1232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == SERVICE_BOOKS_BUTTON_TEXT:
         context.user_data.pop(SERVICE_SUBMENU_KEY, None)
         context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
+        context.user_data.pop(AWAITING_MAINTENANCE_LOOKUP_KEY, None)
         log_message(user_id, "USER", text, username)
         intro = "Отправляю сервисные книжки файлами."
         log_message(user_id, "BOT", intro, username)
@@ -1095,7 +1244,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == SERVICE_VIN_BUTTON_TEXT:
         context.user_data[SERVICE_SUBMENU_KEY] = True
         context.user_data[AWAITING_FRAME_LOOKUP_KEY] = True
-        response = "Введите номер рамы — покажу статус сборки, вид авто и комплектацию."
+        context.user_data[AWAITING_MAINTENANCE_LOOKUP_KEY] = False
+        response = "Введите номер рамы — покажу машину, комплектацию, дату отгрузки и дату планового ТО."
+        log_message(user_id, "USER", text, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_service_keyboard(),
+        )
+        return
+
+    if text == SERVICE_MAINTENANCE_BUTTON_TEXT:
+        context.user_data[SERVICE_SUBMENU_KEY] = True
+        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
+        context.user_data[AWAITING_MAINTENANCE_LOOKUP_KEY] = True
+        response = "Введите VIN (Шасси) — покажу дату продажи и все плановые ТО (1-5)."
         log_message(user_id, "USER", text, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(
@@ -1106,8 +1269,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get(SERVICE_SUBMENU_KEY) and not context.user_data.get(
         AWAITING_FRAME_LOOKUP_KEY
-    ):
-        response = "Выберите: «Сервисные книжки», «Поиск по VIN» или «Главное меню»."
+    ) and not context.user_data.get(AWAITING_MAINTENANCE_LOOKUP_KEY):
+        response = "Выберите: «Сервисные книжки», «Поиск по VIN», «Плановое ТО» или «Главное меню»."
         log_message(user_id, "USER", text, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(
@@ -1118,18 +1281,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get(AWAITING_FRAME_LOOKUP_KEY):
         frame_number = text.strip()
-        status, car_type, config, error = get_frame_status_from_sheet(frame_number)
+        frame_data, error = get_frame_data_from_sheet(frame_number)
 
         if error:
             response = f"Не удалось получить данные. {error}"
-        elif status is None and car_type is None and config is None:
+        elif frame_data is None:
             response = f"Номер рамы {frame_number} не найден."
         else:
             response = (
                 f"Номер рамы: {frame_number}\n"
-                f"Статус сборки: {status or 'не указан'}\n"
-                f"Вид авто: {car_type or 'не указан'}\n"
-                f"Комплектация: {config or 'не указана'}"
+                f"Машина: {frame_data.get('machine') or 'не указана'}\n"
+                f"Комплектация: {frame_data.get('config') or 'не указана'}\n"
+                f"Дата отгрузки: {frame_data.get('ship_date') or 'не указана'}\n"
+                f"Дата планового ТО: {frame_data.get('service_date') or 'не указана'}"
             )
 
         context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
@@ -1139,9 +1303,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
         return
 
+    if context.user_data.get(AWAITING_MAINTENANCE_LOOKUP_KEY):
+        frame_number = text.strip()
+        maintenance_data, error = get_maintenance_data_from_sheet(frame_number)
+
+        if error:
+            response = f"Не удалось получить данные. {error}"
+        elif maintenance_data is None:
+            response = f"VIN/Шасси {frame_number} не найден."
+        else:
+            maintenance_values = maintenance_data.get("maintenance_values", {})
+            response = (
+                f"VIN/Шасси: {frame_number}\n"
+                f"Машина: {maintenance_data.get('machine_name') or 'не указана'}\n"
+                f"Контакты: {maintenance_data.get('contacts') or 'не указаны'}\n"
+                f"Дата продажи: {maintenance_data.get('sale_date') or 'не указана'}\n"
+                f"1 Плановое ТО: {maintenance_values.get('to_1') or 'не указано'}\n"
+                f"2 Плановое ТО: {maintenance_values.get('to_2') or 'не указано'}\n"
+                f"3 Плановое ТО: {maintenance_values.get('to_3') or 'не указано'}\n"
+                f"4 Плановое ТО: {maintenance_values.get('to_4') or 'не указано'}\n"
+                f"5 Плановое ТО: {maintenance_values.get('to_5') or 'не указано'}"
+            )
+
+        context.user_data[AWAITING_MAINTENANCE_LOOKUP_KEY] = False
+        context.user_data.pop(SERVICE_SUBMENU_KEY, None)
+        log_message(user_id, "USER", frame_number, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
+        return
+
     if text == INSTRUCTIONS_BUTTON_TEXT:
         context.user_data.pop(SERVICE_SUBMENU_KEY, None)
         context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
+        context.user_data.pop(AWAITING_MAINTENANCE_LOOKUP_KEY, None)
         context.user_data[AWAITING_INSTRUCTION_KEY] = True
         response = (
             "Выберите технику, по которой нужна инструкция:\n"
