@@ -25,8 +25,5 @@ RUN mkdir -p user_logs exports
 # Даём права на выполнение
 RUN chmod +x start.sh 2>/dev/null || true
 
-# Открываем порт (если нужен веб-интерфейс, но для бота не обязателен)
-EXPOSE 8080
-
 # Команда запуска
 CMD ["python", "-u", "bot.py"]
