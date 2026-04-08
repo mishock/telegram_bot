@@ -623,8 +623,12 @@ INSTRUCTIONS_BUTTON_TEXT = "Инструкции"
 YAK_INSTRUCTION_TEXT = "Як"
 DILIGENCE_INSTRUCTION_TEXT = "Дилижанс"
 WASHER_INSTRUCTION_TEXT = "Поливомоечная машина"
+SERVICE_BOOKS_BUTTON_TEXT = "Сервисные книжки"
+SERVICE_VIN_BUTTON_TEXT = "Поиск по VIN"
+BACK_TO_MAIN_MENU_TEXT = "Главное меню"
 AWAITING_INSTRUCTION_KEY = "awaiting_instruction_vehicle"
 AWAITING_FRAME_LOOKUP_KEY = "awaiting_frame_lookup"
+SERVICE_SUBMENU_KEY = "service_submenu_active"
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -632,14 +636,23 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+def get_service_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [SERVICE_BOOKS_BUTTON_TEXT, SERVICE_VIN_BUTTON_TEXT],
+            [BACK_TO_MAIN_MENU_TEXT],
+        ],
+        resize_keyboard=True,
+    )
+
 def get_instruction_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [YAK_INSTRUCTION_TEXT, DILIGENCE_INSTRUCTION_TEXT],
-            [WASHER_INSTRUCTION_TEXT]
+            [WASHER_INSTRUCTION_TEXT],
+            [BACK_TO_MAIN_MENU_TEXT],
         ],
         resize_keyboard=True,
-        one_time_keyboard=True
     )
 
 async def send_doc_if_exists(update: Update, file_path: str) -> bool:
@@ -1041,14 +1054,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith('/'):
         return
 
+    if text == BACK_TO_MAIN_MENU_TEXT:
+        context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
+        context.user_data.pop(AWAITING_INSTRUCTION_KEY, None)
+        context.user_data.pop(SERVICE_SUBMENU_KEY, None)
+        response = "Главное меню."
+        log_message(user_id, "USER", text, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
+        return
+
     if text == SERVICE_BUTTON_TEXT:
-        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = True
-        response = "Введите номер рамы, и я покажу Статус сборки и Вид авто."
+        context.user_data.pop(AWAITING_INSTRUCTION_KEY, None)
+        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
+        context.user_data[SERVICE_SUBMENU_KEY] = True
+        response = (
+            "Раздел сервиса.\n"
+            "Сервисные книжки — три PDF для скачивания.\n"
+            "Поиск по VIN — статус сборки по номеру рамы (как в таблице)."
+        )
         log_message(user_id, "USER", text, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(
             response,
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_service_keyboard(),
+        )
+        return
+
+    if text == SERVICE_BOOKS_BUTTON_TEXT:
+        context.user_data.pop(SERVICE_SUBMENU_KEY, None)
+        context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
+        log_message(user_id, "USER", text, username)
+        intro = "Отправляю сервисные книжки файлами."
+        log_message(user_id, "BOT", intro, username)
+        await update.message.reply_text(intro, reply_markup=get_main_menu_keyboard())
+        for path in SERVICE_DOC_FILES:
+            await send_doc_if_exists(update, path)
+        return
+
+    if text == SERVICE_VIN_BUTTON_TEXT:
+        context.user_data[SERVICE_SUBMENU_KEY] = True
+        context.user_data[AWAITING_FRAME_LOOKUP_KEY] = True
+        response = "Введите номер рамы — покажу статус сборки, вид авто и комплектацию."
+        log_message(user_id, "USER", text, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_service_keyboard(),
+        )
+        return
+
+    if context.user_data.get(SERVICE_SUBMENU_KEY) and not context.user_data.get(
+        AWAITING_FRAME_LOOKUP_KEY
+    ):
+        response = "Выберите: «Сервисные книжки», «Поиск по VIN» или «Главное меню»."
+        log_message(user_id, "USER", text, username)
+        log_message(user_id, "BOT", response, username)
+        await update.message.reply_text(
+            response,
+            reply_markup=get_service_keyboard(),
         )
         return
 
@@ -1069,12 +1133,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         context.user_data[AWAITING_FRAME_LOOKUP_KEY] = False
+        context.user_data.pop(SERVICE_SUBMENU_KEY, None)
         log_message(user_id, "USER", frame_number, username)
         log_message(user_id, "BOT", response, username)
         await update.message.reply_text(response, reply_markup=get_main_menu_keyboard())
         return
 
     if text == INSTRUCTIONS_BUTTON_TEXT:
+        context.user_data.pop(SERVICE_SUBMENU_KEY, None)
+        context.user_data.pop(AWAITING_FRAME_LOOKUP_KEY, None)
         context.user_data[AWAITING_INSTRUCTION_KEY] = True
         response = (
             "Выберите технику, по которой нужна инструкция:\n"
